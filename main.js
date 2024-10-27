@@ -3,17 +3,17 @@ const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const qrcode = require('qrcode');
-const fs = require('fs');
+const fsExtra = require('fs-extra');
 const path = require('path');
 const cors = require('cors');
 
 const app = express();
 app.use(express.json());
-app.use(cors({ origin: '*' }));
-
+app.use(cors());
 
 let sock; // Socket instance for WhatsApp connection
 let isLoggedIn = false; // Status login WhatsApp
+let isLoggedOut = false; // Flag to track logout status
 
 // Function to initialize WhatsApp connection
 const startSock = async () => {
@@ -31,13 +31,18 @@ const startSock = async () => {
 
             if (connection === 'open') {
                 isLoggedIn = true;
+                isLoggedOut = false;
                 console.log('WhatsApp connected');
             } else if (connection === 'close') {
                 const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== 401);
                 isLoggedIn = false;
-                if (shouldReconnect) {
+
+                // Attempt reconnection only if logout was not initiated
+                if (shouldReconnect && !isLoggedOut) {
                     console.log('Reconnecting WhatsApp...');
-                    startSock(); // Reconnect on disconnect
+                    setTimeout(startSock, 5000); // Reconnect after 5 seconds
+                } else if (isLoggedOut) {
+                    console.log('Logged out, no reconnect attempt');
                 }
             }
 
@@ -76,8 +81,12 @@ app.get('/status', (req, res) => {
 });
 
 app.get('/connect', (req, res) => {
-    if (!isLoggedIn) {  
+    if (!isLoggedIn && !isLoggedOut) {  
         res.json({ message: 'Initializing WhatsApp connection' });
+    } else if (isLoggedOut) {
+        startSock(); // Reinitialize socket if previously logged out
+        isLoggedOut = false;
+        res.json({ message: 'Reinitializing WhatsApp connection' });
     } else {
         res.status(400).json({ message: 'Already logged in' });
     }
@@ -86,11 +95,18 @@ app.get('/connect', (req, res) => {
 // API Endpoint for logging out and deleting session
 app.post('/logout', (req, res) => {
     if (sock) {
-        sock.ev.removeAllListeners();
-        sock.logout();
-        isLoggedIn = false;
-        fs.rmSync(path.join(__dirname, 'auth'), { recursive: true, force: true }); // Delete saved session data
-        res.json({ message: 'Logged out successfully' });
+        try {
+            sock.logout();
+            isLoggedIn = false;
+            isLoggedOut = true;
+
+            // Clear saved session data
+            fsExtra.emptyDirSync(path.join(__dirname, 'auth')); // Ensure auth directory is cleared properly
+            res.json({ message: 'Logged out successfully' });
+        } catch (error) {
+            console.error('Error during logout:', error);
+            res.status(500).json({ message: 'Logout failed', error });
+        }
     } else {
         res.status(400).json({ message: 'No active session found' });
     }
